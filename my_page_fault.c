@@ -55,7 +55,196 @@ typedef void (*do_page_fault_t)(struct pt_regs*, unsigned long);
 
 void my_do_page_fault(struct pt_regs* regs, unsigned long error_code){
     struct task_struct * task = current;
-    printk(KERN_INFO "my_virt_drv: page fault detected in process %lu.\n", (unsigned long)task->pid);
+    void * fault_addr = 0;
+    pgd_t * pgd;
+    pud_t * pud;
+    pmd_t * pmd;
+    pte_t * ptep;
+    pte_t pte;
+    uint64_t one = 1;
+    uint64_t reserved_bit = (one << 50) | (one << 51);
+    uint64_t ignored_bit = (one << 9);
+    uint8_t * enclave_base = 0x7fffe8000000;
+    uint64_t enclave_size = 0x8000000;
+    uint64_t i = 0;
+    uint64_t cnt = 0;
+    int is_code_page = 1;
+    uint64_t data_start_offset = 0x4600000;
+
+    asm("mov %%cr2, %0" : "=r" (fault_addr));
+    //printk(KERN_INFO "my_virt_drv: page fault %p detected in process %lu.\n", fault_addr, (unsigned long)task->pid);
+    //printk(KERN_INFO "my_virt_drv: fault_addr 0x%p pt_regs.ip 0x%llx detected in process %lu\n", fault_addr, regs->ip, (unsigned long)task->pid);
+    pgd = pgd_offset(current->mm, (unsigned long)fault_addr);
+
+    if (pgd_none(*pgd) || pgd_bad(*pgd)) {
+        //printk(KERN_INFO "my_virt_drv: pgd bad value\n");
+        goto out;
+    }
+
+    pud = pud_offset(pgd, fault_addr);
+    if (pud_none(*pud) || pud_bad(*pud)) {
+        //printk(KERN_INFO "my_virt_drv: pud bad value\n");
+        goto out;
+    }
+
+    pmd = pmd_offset(pud, fault_addr);
+    if (pmd_none(*pmd) || pmd_bad(*pmd)) {
+        //printk(KERN_INFO "my_virt_drv: pmd bad value\n");
+        goto out;
+    }
+
+    ptep = pte_offset_map(pmd, fault_addr);
+    if (!ptep) {
+        printk(KERN_INFO "my_virt_drv: ptep is NULL\n");
+    }
+
+    pte = *ptep;
+    //printk(KERN_INFO "my_virt_drv: pte is %llx\n", pte);
+
+
+    if (pte.pte & reserved_bit) {
+        pte_t * first_target_ptep = NULL;
+
+        ptep->pte = ptep->pte ^ reserved_bit;
+        if(!pte_present(pte))
+            ptep->pte = ptep->pte | one;
+
+        printk(KERN_INFO "my_virt_drv: fault_addr 0x%p pt_regs.ip 0x%llx detected in process %lu\n", fault_addr, regs->ip, (unsigned long)task->pid);
+        if(!((uint64_t)fault_addr >= (uint64_t)enclave_base + 0x0 && (uint64_t)fault_addr <= (uint64_t)enclave_base + data_start_offset)){
+            is_code_page = 0;
+        }
+
+        if (is_code_page == 0) {
+            uint8_t * fault_addr_masked = (uint64_t)fault_addr & 0xfffffffff000;
+            //printk(KERN_INFO "data: fault_addr 0x%p pt_regs.ip 0x%llx detected in process %lu\n", fault_addr, regs->ip, (unsigned long)task->pid);
+            for (i=data_start_offset / 0x1000; i<enclave_size/0x1000; i++) {
+            //for (i=0x220000 / 0x1000; i<enclave_size/0x1000; i++) {
+                uint64_t * target_addr = enclave_base + i * 0x1000;
+                pgd_t * pgd_tmp;
+                pud_t * pud_tmp;
+                pmd_t * pmd_tmp;
+                pte_t * ptep_tmp;
+                pte_t pte_tmp;
+
+                first_target_ptep = NULL;
+/*
+                if (target_addr ==  fault_addr_masked || \
+                        target_addr == fault_addr_masked - 0x1000 || \
+                        target_addr == fault_addr_masked + 0x1000) {// when target_addr = 0xabcabc000, fault_addr = 0xabcabcfff, it keeps invalidating its fault_addr. So we have to mask llower 12bits of fault_addr and compare it with target_addr
+
+                    //printk(KERN_INFO, "target_addr : %p, fault_addr : %p\n", target_addr, fault_addr);
+                    continue;
+                }
+*/
+                if (target_addr == 0x7fffec644000 || target_addr == 0x7fffec643000)
+                    continue;
+                if (target_addr == fault_addr_masked)
+                    continue;
+                pgd_tmp = pgd_offset(current->mm, (unsigned long)target_addr);
+                if (pgd_none(*pgd_tmp) || pgd_bad(*pgd_tmp)) {
+                    continue;
+                }
+
+                pud_tmp = pud_offset(pgd_tmp, target_addr);
+                if (pud_none(*pud_tmp) || pud_bad(*pud_tmp)) {
+                    continue;
+                }
+
+                pmd_tmp = pmd_offset(pud_tmp, target_addr);
+                if (pmd_none(*pmd_tmp) || pmd_bad(*pmd_tmp)) {
+                    continue;
+                }
+
+                ptep_tmp = pte_offset_map(pmd_tmp, target_addr);
+                if (!ptep_tmp) {
+                    pte_unmap(ptep_tmp);
+                    continue;
+                }
+
+                if (pte_present(*ptep_tmp) && (ptep_tmp->pte & ignored_bit)) { // if there's already visited page, mark it as fault
+                    //printk(KERN_INFO "AAAAAAAAAAAAAAAAAAAA target_addr is %p\n",  target_addr);
+                    cnt += 1;
+                    ptep_tmp->pte = ptep_tmp->pte ^ reserved_bit;
+                    ptep_tmp->pte = ptep_tmp->pte ^ one;
+                    pte_unmap(ptep_tmp);
+                }
+            }
+            //printk(KERN_INFO "AAAAAAAAA fault_addr is 0x%p cnt is %llu\n", fault_addr, cnt);
+            pte_unmap(ptep);
+            return;
+        }
+
+        //printk(KERN_INFO "my_virt_drv: fault_addr 0x%p pt_regs.ip 0x%llx detected in process %lu\n", fault_addr, regs->ip, (unsigned long)task->pid);
+
+        if ((uint64_t)fault_addr & 0xfffffffff000 != (uint64_t)fault_addr) {
+            ptep->pte = ptep->pte ^ ignored_bit; // Don't make this address fault again
+            return;
+        }
+
+        // for code section
+        for (i=0x220000/0x1000; i<data_start_offset/0x1000; i++) {
+        //for (i=0x220000/0x1000; i<enclave_size/0x1000; i++) {
+            uint64_t * target_addr = enclave_base + i * 0x1000;
+            pgd_t * pgd_tmp;
+            pud_t * pud_tmp;
+            pmd_t * pmd_tmp;
+            pte_t * ptep_tmp;
+            pte_t pte_tmp;
+            uint8_t * fault_addr_masked = (uint64_t)fault_addr & 0xfffffffff000;
+
+            first_target_ptep = NULL;
+
+            /*
+            if (target_addr == fault_addr_masked || \
+                    target_addr == fault_addr_masked - 0x1000 || \
+                    target_addr == fault_addr_masked + 0x1000) {// when target_addr = 0xabcabc000, fault_addr = 0xabcabcfff, it keeps invalidating its fault_addr. So we have to mask llower 12bits of fault_addr and compare it with target_addr
+
+                //printk(KERN_INFO, "target_addr : %p, fault_addr : %p\n", target_addr, fault_addr);
+                continue;
+            }
+            */
+            if (target_addr == fault_addr_masked)
+                continue;
+
+            pgd_tmp = pgd_offset(current->mm, (unsigned long)target_addr);
+            if (pgd_none(*pgd_tmp) || pgd_bad(*pgd_tmp)) {
+                continue;
+            }
+
+            pud_tmp = pud_offset(pgd_tmp, target_addr);
+            if (pud_none(*pud_tmp) || pud_bad(*pud_tmp)) {
+                continue;
+            }
+
+            pmd_tmp = pmd_offset(pud_tmp, target_addr);
+            if (pmd_none(*pmd_tmp) || pmd_bad(*pmd_tmp)) {
+                continue;
+            }
+
+            ptep_tmp = pte_offset_map(pmd_tmp, target_addr);
+            if (!ptep_tmp) {
+                pte_unmap(ptep_tmp);
+                continue;
+            }
+
+            if (pte_present(*ptep_tmp) && (ptep_tmp->pte & ignored_bit)) { // if there's already visited page, mark it as fault
+                //printk(KERN_INFO "fault_addr is %p, target_addr is %p\n", fault_addr, target_addr);
+                cnt += 1;
+                ptep_tmp->pte = ptep_tmp->pte ^ reserved_bit;
+                ptep_tmp->pte = ptep_tmp->pte ^ one;
+                pte_unmap(ptep_tmp);
+            }
+        }
+
+        //printk(KERN_INFO "fault_addr is 0x%p cnt is %llu\n", fault_addr, cnt);
+        //error_code = error_code ^ (1 << 3); // PF_RSVD;
+        pte_unmap(ptep);
+        return;
+    }
+
+
+out:
+    pte_unmap(ptep);
     ((do_page_fault_t)addr_dft_do_page_fault)(regs, error_code);
 }
 
