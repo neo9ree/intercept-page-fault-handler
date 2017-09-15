@@ -1,7 +1,9 @@
 intercept-page-fault-handler
 ============================
 
-This is a demo showing you how to intercept the page fault handler of Linux  x86_64 system
+Custom Page fault Handler for page fault side-channel attack in SGX environment.
+It checks whether a page fault is invoked by side-channel attack or not.
+If the page fault is from enclave, it sets corresponding page table entry as present
+and make other EPC pages to be not present.
 
 load.sh is to load the module while unload.sh is to unload the module.
-The method in this project need the file '/boot/System.map-\<current-linux-version\>' being present and correct.
