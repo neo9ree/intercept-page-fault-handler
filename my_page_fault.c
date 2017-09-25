@@ -69,7 +69,10 @@ void my_do_page_fault(struct pt_regs* regs, unsigned long error_code){
     uint64_t i = 0;
     uint64_t cnt = 0;
     int is_code_page = 1;
-    uint64_t data_start_offset = 0x4600000;
+    uint64_t code_start_offset = 0x262d000;
+    uint64_t code_size = 0x2000000;
+    uint64_t data_start_offset = 0x4655000;
+    //uint64_t data_start_offset = 0x462d000;
 
     asm("mov %%cr2, %0" : "=r" (fault_addr));
     //printk(KERN_INFO "my_virt_drv: page fault %p detected in process %lu.\n", fault_addr, (unsigned long)task->pid);
@@ -182,7 +185,7 @@ void my_do_page_fault(struct pt_regs* regs, unsigned long error_code){
         }
 
         // for code section
-        for (i=0x220000/0x1000; i<data_start_offset/0x1000; i++) {
+        for (i=code_start_offset/0x1000; i<=(code_start_offset+code_size)/0x1000; i++) {
         //for (i=0x220000/0x1000; i<enclave_size/0x1000; i++) {
             uint64_t * target_addr = enclave_base + i * 0x1000;
             pgd_t * pgd_tmp;
